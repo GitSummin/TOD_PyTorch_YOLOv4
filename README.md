@@ -65,7 +65,7 @@ python test.py --img 640 --conf 0.001 --batch 8 --device 0 --data coco.yaml --cf
 * [https://github.com/AlexeyAB/darknet](https://github.com/AlexeyAB/darknet)
 * [https://github.com/ultralytics/yolov3](https://github.com/ultralytics/yolov3)
 * [https://github.com/ultralytics/yolov5](https://github.com/ultralytics/yolov5)
-* [paper(https://arxiv.org/abs/2110.13389)]
+* paper - [https://arxiv.org/abs/2110.13389(https://arxiv.org/abs/2110.13389)]
 
 ## Contributing
 Contributions to this project are welcome! You can contribute in the following ways:
