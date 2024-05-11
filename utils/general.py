@@ -106,7 +106,7 @@ def labels_to_class_weights(labels, nc=80):
         return torch.Tensor()
 
     labels = np.concatenate(labels, 0)  # labels.shape = (866643, 5) for COCO
-    classes = labels[:, 0].astype(np.int)  # labels = [class xywh]
+    classes = labels[:, 0].astype(int)  # labels = [class xywh]
     weights = np.bincount(classes, minlength=nc)  # occurrences per class
 
     # Prepend gridpoint count (for uCE training)
@@ -122,7 +122,7 @@ def labels_to_class_weights(labels, nc=80):
 def labels_to_image_weights(labels, nc=80, class_weights=np.ones(80)):
     # Produces image weights based on class mAPs
     n = len(labels)
-    class_counts = np.array([np.bincount(labels[i][:, 0].astype(np.int), minlength=nc) for i in range(n)])
+    class_counts = np.array([np.bincount(labels[i][:, 0].astype(int), minlength=nc) for i in range(n)])
     image_weights = (class_weights.reshape(1, nc) * class_counts).sum(1)
     # index = random.choices(range(n), weights=image_weights, k=1)  # weight image sample
     return image_weights
@@ -183,10 +183,108 @@ def clip_coords(boxes, img_shape):
     boxes[:, 2].clamp_(0, img_shape[1])  # x2
     boxes[:, 3].clamp_(0, img_shape[0])  # y2
 
+# def NWDloss(boxes1, boxes2):
+#     eps = 1e-7
+    
+#     # 입력을 텐서로 변환 (이미 텐서라면 변환이 필요 없음)
+#     # boxes1 = torch.tensor(boxes1, dtype=torch.float)
+#     # boxes2 = torch.tensor(boxes2, dtype=torch.float)
+
+#     # 평균 벡터와 공분산 행렬 계산
+#     mean_boxes1 = boxes1[:, :2]  # 수정된 부분
+#     mean_boxes2 = boxes2[:, :2]  # 수정된 부분
+
+#     cov_boxes1 = torch.zeros((2, 2))
+#     cov_boxes1[0, 0] = torch.sum(boxes1[:, :2]**2) / 4 + eps  # 수정된 부분
+#     cov_boxes1[1, 1] = torch.sum(boxes1[:, 3]**2) / 4 + eps  # 수정된 부분
+
+#     cov_boxes2 = torch.zeros((2, 2))
+#     cov_boxes2[0, 0] = torch.sum(boxes2[:, :2]**2) / 4 + eps  # 수정된 부분
+#     cov_boxes2[1, 1] = torch.sum(boxes2[:, 3]**2) / 4 + eps  # 수정된 부분
+
+#     mean_diff = mean_boxes1 - mean_boxes2 + eps
+#     cov_diff = torch.linalg.inv(cov_boxes1) @ cov_boxes2 + eps
+#     gaussian_d = torch.norm(mean_diff)**2 + torch.trace(cov_diff)
+
+#     C = 12.7
+
+#     nwd = torch.exp(-torch.sqrt(gaussian_d) / C)
+#     nwd_loss = 1 - nwd
+
+#     return nwd_loss
+
+def wasserstein_loss(pred, target, eps=1e-7, constant=12.8):
+    r"""`Implementation of paper `Enhancing Geometric Factors into
+    Model Learning and Inference for Object Detection and Instance
+    Segmentation <https://arxiv.org/abs/2005.03572>`_.
+    Code is modified from https://github.com/Zzh-tju/CIoU.
+    Args:
+        pred (Tensor): Predicted bboxes of format (x_center, y_center, w, h),
+            shape (n, 4).
+        target (Tensor): Corresponding gt bboxes, shape (n, 4).
+        eps (float): Eps to avoid log(0).
+    Return:
+        Tensor: Loss tensor.
+    """
+
+    center1 = pred[:, :2]
+    center2 = target[:, :2]
+
+    whs = center1[:, :2] - center2[:, :2]
+
+    center_distance = whs[:, 0] * whs[:, 0] + whs[:, 1] * whs[:, 1] + eps #
+
+    w1 = pred[:, 2]  + eps
+    h1 = pred[:, 3]  + eps
+    w2 = target[:, 2] + eps
+    h2 = target[:, 3] + eps
+
+    wh_distance = ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4
+
+    wasserstein_2 = center_distance + wh_distance
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)
+
+
+def bcd_loss(pred, target, tau=0.5):
+    eps = 1e-7
+
+    mu_p = pred[:, :2]
+    mu_t = target[:, :2]
+
+    # Directly construct the squared widths and heights as diagonal elements
+    sigma_p_diag = pred[:, 2:] ** 2
+    sigma_t_diag = target[:, 2:] ** 2
+
+    delta = mu_p - mu_t
+    sigma_diag = 0.5 * (sigma_p_diag + sigma_t_diag)
+
+    # Calculate determinant and inverse for 2x2 matrices analytically
+    det_sigma_p = sigma_p_diag[:, 0] * sigma_p_diag[:, 1] + eps
+    det_sigma_t = sigma_t_diag[:, 0] * sigma_t_diag[:, 1] + eps
+    det_sigma = sigma_diag[:, 0] * sigma_diag[:, 1] + eps
+
+    # Inverse of a diagonal matrix is simply the inverse of each diagonal element
+    sigma_inv_diag = 1.0 / sigma_diag + eps
+
+    # Compute terms analytically
+    term1 = torch.log(det_sigma / torch.sqrt(det_sigma_p * det_sigma_t) + eps)  # 수정된 부분
+    # term1 = torch.log(det_sigma / torch.sqrt(det_sigma_p * det_sigma_t)).unsqueeze(-1) + eps
+    term2 = (delta ** 2 * sigma_inv_diag).sum(dim=1, keepdim=True) + eps
+
+    dis = 0.5 * term1 + 0.125 * term2
+    bcd_dis = dis.clamp(min=1e-6)
+
+    loss = 1 - 1 / (tau + torch.log1p(bcd_dis))
+
+    return loss
+
 
 def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False, EIoU=False, ECIoU=False, eps=1e-9):
     # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
-    box2 = box2.T
+    # box2 = box2.T
+    box1 = box1.T
+    # return wasserstein_loss(box1, box2).to('cuda')
+    return bcd_loss(box1, box2).to('cuda')
 
     # Get the coordinates of bounding boxes
     if x1y1x2y2:  # x1, y1, x2, y2 = box1

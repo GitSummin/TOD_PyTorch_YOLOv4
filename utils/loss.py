@@ -1,3 +1,9 @@
+import os
+import numpy as np
+
+# OMP 에러 해결을 위한 환경 변수 설정
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
 # Loss functions
 
 import torch
@@ -58,6 +64,106 @@ class FocalLoss(nn.Module):
         else:  # 'none'
             return loss
 
+# def NWDloss(boxes1, boxes2):
+#     eps = 1e-7
+    
+#     # 입력을 텐서로 변환 (이미 텐서라면 변환이 필요 없음)
+#     # boxes1 = torch.tensor(boxes1, dtype=torch.float)
+#     # boxes2 = torch.tensor(boxes2, dtype=torch.float)
+
+#     # 평균 벡터와 공분산 행렬 계산
+#     mean_boxes1 = boxes1[:, :2]  # 수정된 부분
+#     mean_boxes2 = boxes2[:, :2]  # 수정된 부분
+
+#     cov_boxes1 = torch.zeros((2, 2))
+#     cov_boxes1[0, 0] = torch.sum(boxes1[:, :2]**2) / 4 + eps  # 수정된 부분
+#     cov_boxes1[1, 1] = torch.sum(boxes1[:, 3]**2) / 4 + eps  # 수정된 부분
+
+#     cov_boxes2 = torch.zeros((2, 2))
+#     cov_boxes2[0, 0] = torch.sum(boxes2[:, :2]**2) / 4 + eps  # 수정된 부분
+#     cov_boxes2[1, 1] = torch.sum(boxes2[:, 3]**2) / 4 + eps  # 수정된 부분
+
+#     mean_diff = mean_boxes1 - mean_boxes2 + eps
+#     cov_diff = torch.linalg.inv(cov_boxes1) @ cov_boxes2 + eps
+#     gaussian_d = torch.norm(mean_diff)**2 + torch.trace(cov_diff)
+
+#     C = 12.7
+
+#     nwd = torch.exp(-torch.sqrt(gaussian_d) / C)
+#     nwd_loss = 1 - nwd
+
+#     return nwd_loss
+
+
+def wasserstein_loss(pred, target, eps=1e-7, constant=12.8):
+    r"""`Implementation of paper `Enhancing Geometric Factors into
+    Model Learning and Inference for Object Detection and Instance
+    Segmentation <https://arxiv.org/abs/2005.03572>`_.
+    Code is modified from https://github.com/Zzh-tju/CIoU.
+    Args:
+        pred (Tensor): Predicted bboxes of format (x_center, y_center, w, h),
+            shape (n, 4).
+        target (Tensor): Corresponding gt bboxes, shape (n, 4).
+        eps (float): Eps to avoid log(0).
+    Return:
+        Tensor: Loss tensor.
+    """
+
+    center1 = pred[:, :2]
+    center2 = target[:, :2]
+
+    whs = center1[:, :2] - center2[:, :2]
+
+    center_distance = whs[:, 0] * whs[:, 0] + whs[:, 1] * whs[:, 1] + eps #
+
+    w1 = pred[:, 2]  + eps
+    h1 = pred[:, 3]  + eps
+    w2 = target[:, 2] + eps
+    h2 = target[:, 3] + eps
+
+    wh_distance = ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4
+
+    wasserstein_2 = center_distance + wh_distance
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)
+
+
+def bcd_loss(pred, target, tau=0.5):
+    eps = 1e-7
+
+    mu_p = pred[:, :2]
+    mu_t = target[:, :2]
+
+    # Directly construct the squared widths and heights as diagonal elements
+    sigma_p_diag = pred[:, 2:] ** 2
+    sigma_t_diag = target[:, 2:] ** 2
+
+    delta = mu_p - mu_t
+    sigma_diag = 0.5 * (sigma_p_diag + sigma_t_diag)
+
+    # Calculate determinant and inverse for 2x2 matrices analytically
+    det_sigma_p = sigma_p_diag[:, 0] * sigma_p_diag[:, 1] + eps
+    det_sigma_t = sigma_t_diag[:, 0] * sigma_t_diag[:, 1] + eps
+    det_sigma = sigma_diag[:, 0] * sigma_diag[:, 1] + eps
+
+    # Inverse of a diagonal matrix is simply the inverse of each diagonal element
+    sigma_inv_diag = 1.0 / sigma_diag + eps
+
+    # Compute terms analytically
+    # term1 = torch.log(det_sigma / torch.sqrt(det_sigma_p * det_sigma_t) + eps)  # 수정된 부분
+    term1 = torch.log((det_sigma / torch.sqrt(det_sigma_p * det_sigma_t)) + eps)
+    # term1 = torch.log(det_sigma / torch.sqrt(det_sigma_p * det_sigma_t)).unsqueeze(-1) + eps
+    term2 = (delta ** 2 * sigma_inv_diag).sum(dim=1) + eps
+        
+
+    dis = 0.5 * term1 + 0.125 * term2
+    bcd_dis = dis.clamp(min=0)
+
+    # loss = 1 - 1 / (tau + torch.log1p(bcd_dis))
+    loss = torch.log1p(bcd_dis) / (tau + torch.log1p(bcd_dis))
+
+
+    return loss
+
 
 def compute_loss(p, targets, model):  # predictions, targets, model
     device = targets.device
@@ -96,11 +202,39 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             pxy = ps[:, :2].sigmoid() * 2. - 0.5
             pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
             pbox = torch.cat((pxy, pwh), 1).to(device)  # predicted box
-            iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)  # iou(prediction, target)
-            lbox += (1.0 - iou).mean()  # iou loss
+            
+            #########################
+            ###### 수정된 부분 #######
+            #########################
 
-            # Objectness
-            tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
+            # nwd = wasserstein_loss(pbox, tbox[i]).squeeze()
+            bcd_loss_value = bcd_loss(pbox, tbox[i], tau=0.5) 
+
+            # bcd_loss 결과가 텐서가 아닐 경우 텐서로 변환
+            if not isinstance(bcd_loss_value, torch.Tensor):
+                bcd_loss_value = torch.tensor(bcd_loss_value, dtype=torch.float32, device=device)
+
+            # bcd_loss 결과 텐서에 squeeze() 적용
+            bcd_loss_value = bcd_loss_value.squeeze()
+
+            # iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=False).squeeze()  # iou(prediction, target)
+            # lbox += (1 - model.gr) * (1.0 - bcd).mean() + model.gr * (1.0 - iou).mean()  # nwd loss
+            
+            # lbox += (1.0 - iou).mean() # iou_loss
+            lbox += bcd_loss_value.mean() # bcd_loss
+
+            # BCD 손실을 사용해 객체 탐지 점수 계산 및 조정
+            objectness_score = 1 / (1 + bcd_loss_value)
+            objectness_score = objectness_score.float()
+            tobj = tobj.float()
+            tobj[b, a, gj, gi] = objectness_score
+
+            # Objectness (원래)
+            # tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * iou.detach().clamp(0).type(tobj.dtype)  # iou ratio
+
+            #########################
+            #########################
+            #########################
 
             # Classification
             if model.nc > 1:  # cls loss (only if multiple classes)
@@ -123,6 +257,60 @@ def compute_loss(p, targets, model):  # predictions, targets, model
     loss = lbox + lobj + lcls
     return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
 
+'''
+def compute_loss(preds, targets, model):
+    device = targets.device
+    lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
+    # 예제에서는 build_targets 함수의 세부 구현이 생략되어 있습니다.
+    # 실제 구현에서는 모델의 출력 형식과 일치하도록 이 함수를 구현해야 합니다.
+    tcls, tbox, indices, anchors = build_targets(preds, targets, model)  # build_targets 함수 구현 필요
+
+    BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([model.hyp['cls_pw']])).to(device)
+    BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([model.hyp['obj_pw']])).to(device)
+
+    cp, cn = smooth_BCE(eps=0.0)  # 여기서는 단순화를 위해 eps=0.0을 사용합니다.
+    g = model.hyp['fl_gamma']
+    if g > 0:
+        BCEcls = FocalLoss(BCEcls, g)
+        BCEobj = FocalLoss(BCEobj, g)
+
+    for i, pi in enumerate(preds):  # layer index, layer predictions
+        b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
+        tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
+
+        n = b.shape[0]  # number of targets
+        if n:
+            ps = pi[b, a, gj, gi]
+            pxy = ps[:, :2].sigmoid() * 2. - 0.5
+            pwh = (ps[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
+            pbox = torch.cat((pxy, pwh), 1).to(device)
+
+            # iou 및 bcd_loss 계산은 여기서 진행합니다.
+            # 여기서는 단순화를 위해 iou만 계산합니다.
+            iou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True).squeeze()
+            lbox += (1.0 - iou).mean()  # iou loss
+            
+            # 객체 탐지 점수를 계산하여 객체 탐지 손실을 조정합니다.
+            # 이 부분은 bcd_loss와 compute_objectness_score 함수에 대한 세부 구현이 필요합니다.
+            
+            # Classification
+            if model.nc > 1:  # cls loss (only if multiple classes)
+                t = torch.full_like(ps[:, 5:], cn, device=device)  # targets
+                t[range(n), tcls[i]] = cp
+                lcls += BCEcls(ps[:, 5:], t)
+
+        lobj += BCEobj(pi[..., 4], tobj)
+
+    lbox = torch.unsqueeze(lbox, 0)  # 손실 값을 1차원 텐서로 변환
+    lobj = torch.unsqueeze(lobj, 0)
+    lcls = torch.unsqueeze(lcls, 0)
+    bs = tobj.shape[0]  # batch size
+
+    total_loss = (lbox + lobj + lcls) * bs
+    loss_items = torch.cat((lbox, lobj, lcls)).detach()  # 1차원 텐서로 합치기
+
+    return total_loss, loss_items
+'''
 
 def build_targets(p, targets, model):
     nt = targets.shape[0]  # number of anchors, targets
@@ -141,7 +329,8 @@ def build_targets(p, targets, model):
         a, t, offsets = [], targets * gain, 0
         if nt:
             na = anchors.shape[0]  # number of anchors
-            at = torch.arange(na).view(na, 1).repeat(1, nt)  # anchor tensor, same as .repeat_interleave(nt)
+            # at = torch.arange(na).view(na, 1).repeat(1, nt)  # anchor tensor, same as .repeat_interleave(nt)
+            at = torch.arange(na, device=targets.device).view(na, 1).repeat(1, nt)  # anchor tensor
             r = t[None, :, 4:6] / anchors[:, None]  # wh ratio
             j = torch.max(r, 1. / r).max(2)[0] < model.hyp['anchor_t']  # compare
             # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n) = wh_iou(anchors(3,2), gwh(n,2))
@@ -164,9 +353,18 @@ def build_targets(p, targets, model):
 
         # Append
         #indices.append((b, a, gj, gi))  # image, anchor, grid indices
-        indices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))  # image, anchor, grid indices
+        # indices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))  # image, anchor, grid indices
+        # indices.append((b, a, gj.clamp_(0, gain[3] - 1).long(), gi.clamp_(0, gain[2] - 1).long()))  # image, anchor, grid indices
+        indices.append((b, a, gj.clamp(0, gain[3] - 1).long(), gi.clamp(0, gain[2] - 1).long()))
         tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
         anch.append(anchors[a])  # anchors
         tcls.append(c)  # class
 
     return tcls, tbox, indices, anch
+
+# if __name__ == "__main__":
+#     boxes1 = torch.tensor([[25, 25, 50, 50]], dtype=torch.float)
+#     boxes2 = torch.tensor([[35, 35, 60, 60]], dtype=torch.float)
+
+#     loss = NWDloss(boxes1, boxes2)
+#     print(f"NWD loss: {loss}")

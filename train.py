@@ -18,6 +18,7 @@ import yaml
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+import time
 from tqdm import tqdm
 
 import test  # import test.py to get mAP after each epoch
@@ -70,6 +71,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     train_path = data_dict['train']
     test_path = data_dict['val']
     nc, names = (1, ['item']) if opt.single_cls else (int(data_dict['nc']), data_dict['names'])  # number classes, names
+    print('@'*100)
+    print('nc :', nc)
+    
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
     # Model
@@ -212,7 +216,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     hyp['cls'] *= nc / 80.  # scale coco-tuned hyp['cls'] to current dataset
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
-    model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
+    model.gr = 0.5  # iou loss ratio (obj_loss = 1.0 or iou)
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
     model.names = names
 
@@ -237,7 +241,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         if opt.image_weights:
             # Generate indices
             if rank in [-1, 0]:
-                cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2  # class weights
+                cw = model.class_weights.cuda().numpy() * (1 - maps) ** 2  # class weights
                 iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
                 dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
             # Broadcast if DDP
@@ -245,7 +249,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
                 dist.broadcast(indices, 0)
                 if rank != 0:
-                    dataset.indices = indices.cpu().numpy()
+                    dataset.indices = indices.cuda().numpy()
 
         # Update mosaic border
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)

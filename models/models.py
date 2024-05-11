@@ -384,6 +384,7 @@ class JDELayer(nn.Module):
 
     def forward(self, p, out):
         ASFF = False  # https://arxiv.org/abs/1911.09516
+    
         if ASFF:
             i, n = self.index, self.nl  # index in layers, number of layers
             p = out[self.layers[i]]
@@ -489,7 +490,10 @@ class Darknet(nn.Module):
             return y, None
 
     def forward_once(self, x, augment=False, verbose=False):
+        #print("x.shape", x.shape)
         img_size = x.shape[-2:]  # height, width
+        #print("img_size :",img_size)
+
         yolo_out, out = [], []
         if verbose:
             print('0', x.shape)
@@ -503,7 +507,8 @@ class Darknet(nn.Module):
                            torch_utils.scale_img(x.flip(3), s[0]),  # flip-lr and scale
                            torch_utils.scale_img(x, s[1]),  # scale
                            ), 0)
-
+        
+        #print("x2.shape", x.shape)
         for i, module in enumerate(self.module_list):
             name = module.__class__.__name__
             #print(name)
@@ -513,14 +518,18 @@ class Darknet(nn.Module):
                     sh = [list(x.shape)] + [list(out[i].shape) for i in module.layers]  # shapes
                     str = ' >> ' + ' + '.join(['layer %g %s' % x for x in zip(l, sh)])
                 x = module(x, out)  # WeightedFeatureFusion(), FeatureConcat()
+                
             elif name == 'YOLOLayer':
                 yolo_out.append(module(x, out))
+                
             elif name == 'JDELayer':
                 yolo_out.append(module(x, out))
+                
             else:  # run module directly, i.e. mtype = 'convolutional', 'upsample', 'maxpool', 'batchnorm2d' etc.
                 #print(module)
                 #print(x.shape)
                 x = module(x)
+               
 
             out.append(x if self.routs[i] else [])
             if verbose:
@@ -528,13 +537,17 @@ class Darknet(nn.Module):
                 str = ''
 
         if self.training:  # train
+            #print(yolo_out)
             return yolo_out
         elif ONNX_EXPORT:  # export
             x = [torch.cat(x, 0) for x in zip(*yolo_out)]
             return x[0], torch.cat(x[1:3], 1)  # scores, boxes: 3780x80, 3780x4
         else:  # inference or test
             x, p = zip(*yolo_out)  # inference output, training output
-            x = torch.cat(x, 1)  # cat yolo outputs
+
+            # print("x[0].shape:", x[0].shape)
+            # print("x[1].shape:", x[1].shape)
+            x = torch.cat(x, 1)  # cat yolo output
             if augment:  # de-augment results
                 x = torch.split(x, nb, dim=0)
                 x[1][..., :4] /= s[0]  # scale

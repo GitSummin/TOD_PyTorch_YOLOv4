@@ -89,7 +89,7 @@ def plot_wh_methods():  # from utils.general import *; plot_wh_methods()
 def output_to_target(output, width, height):
     # Convert model output to target format [batch_id, class_id, x, y, w, h, conf]
     if isinstance(output, torch.Tensor):
-        output = output.cpu().numpy()
+        output = output.detach().cuda().numpy()
 
     targets = []
     for i, o in enumerate(output):
@@ -104,9 +104,10 @@ def output_to_target(output, width, height):
                 cls = int(pred[5])
 
                 targets.append([i, cls, x, y, w, h, conf])
+    print(targets)
 
-    return np.array(targets)
-
+    target = [tar.cpu().numpy() if isinstance(tar, torch.Tensor) and tar.is_cuda else tar.cuda().numpy() if isinstance(tar, torch.Tensor) else tar for tar2 in targets for tar in tar2]
+    return np.array(target)
 
 def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max_size=640, max_subplots=16):
     # Plot image grid with labels
@@ -147,7 +148,15 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
 
         mosaic[block_y:block_y + h, block_x:block_x + w, :] = img
         if len(targets) > 0:
-            image_targets = targets[targets[:, 0] == i]
+            # Find the index of the column containing image indices
+            img_index_col = 0
+            
+            # Ensure targets is a NumPy array
+            targets = np.array(targets)
+            if len(targets.shape) == 1:
+                targets = targets.reshape(1, -1)
+            image_targets = targets[targets[:, img_index_col] == i]
+            
             boxes = xywh2xyxy(image_targets[:, 2:6]).T
             classes = image_targets[:, 1].astype('int')
             labels = image_targets.shape[1] == 6  # labels if no conf column

@@ -407,9 +407,9 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             pxy = torch.sigmoid(ps[:, 0:2])  # pxy = pxy * s - (s - 1) / 2,  s = 1.5  (scale_xy)
             pwh = torch.exp(ps[:, 2:4]).clamp(max=1E3) * anchor_vec[i]
             pbox = torch.cat((pxy, pwh), 1)  # predicted box
-            giou = bbox_iou(pbox.t(), tbox[i], x1y1x2y2=False, GIoU=True)  # giou computation
+            giou = bbox_iou(pbox.t(), tbox[i], x1y1x2y2=False, GIoU=True).squeeze() # giou computation
             lbox += (1.0 - giou).sum() if red == 'sum' else (1.0 - giou).mean()  # giou loss
-            tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * giou.detach().clamp(0).type(tobj.dtype)  # giou ratio
+            tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * giou.detach().squeeze().clamp(0).type(tobj.dtype)  # giou ratio
 
             if model.nc > 1:  # cls loss (only if multiple classes)
                 t = torch.full_like(ps[:, 5:], cn)  # targets
